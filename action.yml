@@ -1,16 +1,69 @@
+# file: action.yml
+# version: 2.0.0
+
 name: 'Python Release Build'
-description: 'Build Python packages for release'
-author: 'jdfalk'
+description: 'Build Python packages and optionally publish to PyPI'
+author: 'falkcorp'
+
+branding:
+  icon: 'package'
+  color: 'yellow'
 
 inputs:
+  # --- orchestration inputs (from wrapper) ---
   python-version:
     description: 'Python version to use'
     required: false
     default: '3.13'
   protobuf-artifacts:
-    description: 'Whether protobuf artifacts are available'
+    description: 'Whether protobuf artifacts are available from an earlier job step'
     required: false
     default: 'false'
+
+  # --- implementation inputs (from base) ---
+  package-dir:
+    description: 'Directory containing setup.py or pyproject.toml'
+    required: false
+    default: '.'
+  build-backend:
+    description: 'Build backend (setuptools, poetry, hatchling)'
+    required: false
+    default: 'setuptools'
+  run-tests:
+    description: 'Run tests before publishing'
+    required: false
+    default: 'true'
+  test-command:
+    description: 'Command to run tests'
+    required: false
+    default: 'pytest -m "not slow" --maxfail=1 --disable-warnings'
+  repository-url:
+    description: 'PyPI repository URL'
+    required: false
+    default: 'https://upload.pypi.org/legacy/'
+  pypi-token:
+    description: 'PyPI API token (leave empty to skip publish)'
+    required: false
+    default: ''
+  skip-existing:
+    description: 'Skip existing packages on PyPI'
+    required: false
+    default: 'true'
+  verify-metadata:
+    description: 'Verify package metadata with twine check'
+    required: false
+    default: 'true'
+
+outputs:
+  package-name:
+    description: 'Name of the built package'
+    value: ${{ steps.build.outputs.package-name }}
+  package-version:
+    description: 'Version of the built package'
+    value: ${{ steps.build.outputs.package-version }}
+  wheel-path:
+    description: 'Path to built wheel file'
+    value: ${{ steps.build.outputs.wheel-path }}
 
 runs:
   using: 'composite'
@@ -22,16 +75,69 @@ runs:
         name: protobuf-generated
         path: proto-generated
 
-    - name: Build Python package
-      uses: falkcorp/gha-release-python@a89549b5c2c599ac723a3b71ecd77638c11a9b17 # v1.0.3
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: ${{ inputs.python-version }}
-        package-dir: .
-        run-tests: 'true'
-        test-command: pytest -m "not slow" --maxfail=1 --disable-warnings
-        pypi-token: dummy-no-publish
-        skip-existing: 'true'
-        verify-metadata: 'true'
+
+    - name: Install build tools
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: Install dependencies
+      working-directory: ${{ inputs.package-dir }}
+      shell: bash
+      run: |
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+        if [ -f requirements-dev.txt ]; then
+          pip install -r requirements-dev.txt
+        fi
+
+    - name: Run tests
+      if: inputs.run-tests == 'true'
+      working-directory: ${{ inputs.package-dir }}
+      shell: bash
+      run: ${{ inputs.test-command }}
+
+    - name: Build package
+      id: build
+      working-directory: ${{ inputs.package-dir }}
+      shell: bash
+      run: |
+        python -m build
+
+        WHEEL_FILE=$(ls dist/*.whl | head -n 1)
+        PKG_NAME=$(python -c "import re; print(re.match(r'dist/(.+?)-', '$WHEEL_FILE').group(1))")
+        PKG_VERSION=$(python -c "import re; print(re.match(r'dist/.+?-(.+?)-', '$WHEEL_FILE').group(1))")
+
+        echo "package-name=$PKG_NAME" >> $GITHUB_OUTPUT
+        echo "package-version=$PKG_VERSION" >> $GITHUB_OUTPUT
+        echo "wheel-path=$WHEEL_FILE" >> $GITHUB_OUTPUT
+
+    - name: Verify metadata
+      if: inputs.verify-metadata == 'true'
+      working-directory: ${{ inputs.package-dir }}
+      shell: bash
+      run: twine check dist/*
+
+    - name: Publish to PyPI
+      if: inputs.pypi-token != '' && inputs.pypi-token != 'dummy-no-publish'
+      working-directory: ${{ inputs.package-dir }}
+      shell: bash
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ inputs.pypi-token }}
+        TWINE_REPOSITORY_URL: ${{ inputs.repository-url }}
+      run: |
+        SKIP_ARG=""
+        if [ "${{ inputs.skip-existing }}" == "true" ]; then
+          SKIP_ARG="--skip-existing"
+        fi
+        twine upload $SKIP_ARG dist/*
 
     - name: Upload Python dist artifacts
       if: always()
@@ -41,3 +147,17 @@ runs:
         path: dist/**
         if-no-files-found: ignore
         retention-days: 14
+
+    - name: Output summary
+      shell: bash
+      run: |
+        echo "## Python Package Release Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Package:** ${{ steps.build.outputs.package-name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** ${{ steps.build.outputs.package-version }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Python:** ${{ inputs.python-version }}" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ inputs.pypi-token }}" ] && [ "${{ inputs.pypi-token }}" != "dummy-no-publish" ]; then
+          echo "**Repository:** ${{ inputs.repository-url }}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**Published:** no (no pypi-token provided)" >> $GITHUB_STEP_SUMMARY
+        fi
