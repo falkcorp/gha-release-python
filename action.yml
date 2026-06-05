@@ -23,7 +23,7 @@ runs:
         path: proto-generated
 
     - name: Build Python package
-      uses: jdfalk/release-python-action@a89549b5c2c599ac723a3b71ecd77638c11a9b17 # v1.0.3
+      uses: falkcorp/gha-release-python@a89549b5c2c599ac723a3b71ecd77638c11a9b17 # v1.0.3
       with:
         python-version: ${{ inputs.python-version }}
         package-dir: .
